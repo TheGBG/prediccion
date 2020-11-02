@@ -1,0 +1,2 @@
+# Segunda práctica de predicción:
+Trabajando sobre la práctica 1, modificar la parte de modelos para incluir lo explicado en la última sesión (Cross Validation, Regularización: LASSO, Ridge, Elsastic Net)
