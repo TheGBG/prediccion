@@ -1,0 +1,255 @@
+---
+title: "Práctica 3: modelos GAM"
+author: "Gabriel Blanco García"
+output: 
+   html_document:
+      toc: true
+      toc_depth: 3
+      number_sections: true
+  
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+# Introuducción
+## Motivación del trabajo
+El objetivo de la investigación es elaborar el mejor modelo predictivo para 
+los datos del informe PISA. Se persigue construir un modelo que, al emplear 
+datos distintos a aquellos con los que ha sido entrenado, consiga predecir cual
+será la nota media de ciencias en cada país, conociendo otras variables 
+
+## Qué es PISA 
+Es un programa internacional para la evaluación de estudiantes, o por sus 
+siglas en inglés, Programme for International Student Assessment. Lo realiza 
+la OCDE a nivel mundial, y su objetivo no es evaluar a los estudiantes, sino 
+valorar el sistema educativo al que pertenencen. No obstante, para este 
+trabajo se emplea únicamente la calificación en ciencias de cada 
+alumno para su respectivo país.
+
+## Glosario de términos
+Las variables clave y que se emplean en el análisis son las siguientes
+- Overall: la nota media de ciencias, la variable dependiente que queremos 
+predecir.
+- Interest: el interés del alumno por la ciencia
+- Support: el apoyo a la investigación científica en el país.
+- Income: la paridad de poder adquisitvio en dólares de 2005
+- Health: índice de salud del país
+- Education: índice de educación del país
+- HDI: índice de desarollo humano, compuesto por los tres anteriores. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.height = 7, fig.width = 10, fig.align = "center")
+```
+
+```{r paquetes}
+library(tidyverse) # trata de datos
+library(broom) # modelos en version tidy 
+library(flextable)
+library(reshape2)
+library(janitor) # limpieza
+library(skimr) # summary 
+
+library(imputeTS) # imputar NA
+
+library(rsample) # division de los datos
+library(mgcv) # el modelo 
+library(glmnet) # la regularizacion 
+```
+
+
+# Análisis exploratiorio 
+```{r cargo los datos}
+pisa <- read.csv("data/pisasci2006.csv")
+pisa <- clean_names(pisa)
+skim(pisa)
+```
+Eliminación de las variables que no son clave 
+
+```{r}
+pisa <- pisa %>% 
+  select(-c("issues", "explain", "evidence"))
+```
+
+Tratamiento de los valores nulos: todas aquellas observaciones que tengan 
+más de 3 valores nulos se eliminan, puesto que teniendo 7 variables, es preferible 
+eliminar aquellas observaciones que tengan 4 valores nulos o más. Para el resto
+de casos, se evalúa la distribución de dicha variable. Si no hay valores 
+extremos, se imputa la media. Si por el contrario hay valores extremos, se 
+imputa la mediana.
+
+```{r quito NA}
+pisa <- pisa %>% 
+  mutate(total_na = rowSums(is.na(pisa))) %>% # suma por filas de los NA
+  filter(total_na < 4) # me quedo solo con las de menos de 4 NA
+
+head(pisa)
+
+pisa <- pisa %>% 
+  select(-c("total_na")) # quito esta columna que ya no me hace falta 
+```
+En total se eliminan 4 observaciones. Ahora para la imputacion, se representan
+gráficamente las variables, con el fin de identificar qué variables tienen 
+valors extremos. Se utilizan diagramas de caja y bigotes porque éstos
+representan los valores extremos con puntos. En concreto, los boxplot utilizan
+el criterio del rango intercuartílico. Esto es, caulquier valor que esté 
+por encima del tercer cuartil más 1.5 veces el rango intercuartílico, o por 
+debajo del primer caurtil menos 1.5 veces el rango intercuartílico, se considera
+valor extremo. En un diagrama de caja y bigotes. la distancia de 1.5 veces el
+rango intercuartílico viene representada por los "bigotes".  
+Los diagramas se hacen en dos grupos, puesto que el segundo grupo de variables 
+es de valores porcentuales, y si se representa con las primeras variables, la 
+visualización es inservible
+
+```{r visualizacion de outliers en dos grupos}
+ggplot(stack(pisa[, 2:4]), aes(x = ind, y = values, fill = ind)) +
+  geom_boxplot() 
+
+ggplot(stack(pisa[, 5:8]), aes(x = ind, y = values, fill = ind)) +
+  geom_boxplot() 
+```
+
+Como no hay variables con valores extremos, imputo la media de cada variable 
+para sus valores NA.
+```{r imputacion}
+pisa <- na_mean(pisa)
+sum(is.na(pisa))
+```
+La función `na_mean()` del paquete `imputeTS` recorre el dataframe, y sustituye
+cada valor NA por la media de la variable de dicho valor. También se puede 
+imputar la mediana, pero en este caso no es necesario.
+
+## Visualizaciones
+
+```{r}
+library(GGally)
+
+ggpairs(pisa, 
+      columns = 2:8,
+      ggplot2::aes(combo = "box"),
+      combo = "box_no_facet", 
+      discrete = "facetbar")
+```
+Todas las variables están medianamente correlacionadas con la nota de 
+ciencias. Es llamativo que la variable interés muestre una correlación tal 
+negativa con respecto a la nota media, algo que no cabría imaginarse a 
+priori. 
+
+A continuación se representan los gráficos de dispersión de todas
+las variables en relación con la nota media. Se ajustan las nubes de 
+puntos utilizando regresión lineal
+
+```{r dispersiones lm}
+pisa %>% tidyr::gather(key = "variable", value = "valor", 3:8) %>% 
+  ggplot(aes(x = valor, y = overall)) +
+    geom_point(color = "darkslategray3", alpha = 0.75) +
+    
+  geom_smooth(method = "lm",
+                se = FALSE,
+                color = "red3") +
+    
+    facet_wrap(~variable, ncol = 3, scales = "free") +
+  theme_minimal()
+```
+Se puede observar que la regresión lineal no se ajusta demasiado bien, en
+términos generales, a los datos. Probemos el mismo gráfico con un ajuste
+mediante GAM
+
+```{r modulo base}
+# Fit the model
+gam_mod <- gam(formula = overall ~ s(edu) + s(issues),
+               method = "GCV.Cp", 
+               data = pisa)
+
+# Plot the results
+plot(gam_mod, residuals = TRUE, pch = 1, shade = TRUE, shade.col = "palegreen")
+
+# Extrar coef 
+coef(gam_mod)
+```
+
+
+```{r dispersiones GAM}
+pisa %>% tidyr::gather(key = "variable", value = "valor", 3:8) %>% 
+  ggplot(aes(x = valor, y = overall)) +
+    geom_point(color = "darkslategray3", alpha = 0.75) +
+    
+  geom_smooth(method = "gam",
+                se = FALSE,
+                color = "red3") +
+    
+    facet_wrap(~variable, ncol = 3, scales = "free") +
+  theme_minimal()
+```
+Parece claro que un modelo GAM resulta el adecuado para este problema, pese 
+a haber variables que parecen presentar relación lineal.
+
+# Modelos iniciales 
+
+Ya que todas las variables mostraban alta correlación, incluyo todas en el modelo. Utilizo splines suavizados en las variables que no muestran 
+relacion lineal en los gráficos. Solo empleo el hdi, puesto que las otras
+tres variables (health, income y education estan contenidas en hdi)
+
+```{r}
+modelo_inicial <- gam(overall~ s(interest) + support + hdi, data = pisa)
+```
+
+Planteo otro modelo con las variables de hdi por separado y en splines
+
+```{r}
+modelo_secundario <- gam(overall ~ s(interest) + s(income) + edu +
+                           s(health) + support, data = pisa)
+```
+
+Comparo los dos modelos 
+
+```{r}
+summary(modelo_inicial)
+summary(modelo_secundario)
+```
+## Interpretación de los resultados
+
+
+
+
+## Regularización del modelo 
+# Evaluación del modelo 
+# Refinado del modelo 
+# Modelo final
+
+
+añadir el efecto parcial 
+library(mgcv)
+# Fit the model
+mod <- gam(hw.mpg ~ s(weight) + s(rpm) + s(price) + comp.ratio, 
+           data = mpg, method = "REML")
+
+# Plot the weight effect with colored shading
+plot(mod, select = 1, shade = TRUE, shade.col = "hotpink")
+
+# Make another plot adding the intercept value and uncertainty
+plot(mod, select = 1, shift = coef(mod)[1], seWithMean = TRUE)
+
+Model checking with gam.check
+
+```{r}
+
+# Parametrizados
+
+interest_k <- 15
+income_k <- 12
+health_k <- 1
+
+modelo_secundario <- gam(overall ~ s(interest, k = interest_k) + 
+                           s(income, k = income_k) + 
+                           edu +
+                           health + 
+                           support, data = pisa)
+
+
+
+summary(modelo_secundario)
+gam.check(modelo_secundario)
+```
+
+
