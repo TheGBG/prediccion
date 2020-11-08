@@ -1,2 +1,5 @@
-# Repositorio de prácticas. 
-Cada práctica tiene sus carpeta, dentro de la cual se incluyen los archivos .Rmd, .R, proyectos de R, etc. Añado también a cada carpeta un README. Las carpetas data e images dentro de cada práctica son para almacenar los distintos ficheros de datos o imagenes necesarias para cada práctica
+# Práctica 3: modelos GAM. 
+
+Construir un modelo GAM que modelice la relación entre la nota media de ciencias
+del informe pisa y el resto de varibles del dataset pisa2006csv. Utilizar 
+splines suavizados y validación cruzada cuando sea posible.

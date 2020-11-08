@@ -13,10 +13,8 @@ editor_options:
 ---
 # Introuducción
 ## Motivación del trabajo
-El objetivo de la investigación es elaborar el mejor modelo predictivo para 
-los datos del informe PISA. Se persigue construir un modelo que, al emplear 
-datos distintos a aquellos con los que ha sido entrenado, consiga predecir cual
-será la nota media de ciencias en cada país, conociendo otras variables 
+El objetivo es modelizar la relación entre la puntuación media de ciencias 
+y el resto de variables, utilizando modelos de splines y GAM
 
 ## Qué es PISA 
 Es un programa internacional para la evaluación de estudiantes, o por sus 
@@ -28,8 +26,7 @@ alumno para su respectivo país.
 
 ## Glosario de términos
 Las variables clave y que se emplean en el análisis son las siguientes
-- Overall: la nota media de ciencias, la variable dependiente que queremos 
-predecir.
+- Overall: la nota media de ciencias.
 - Interest: el interés del alumno por la ciencia
 - Support: el apoyo a la investigación científica en el país.
 - Income: la paridad de poder adquisitvio en dólares de 2005
@@ -45,7 +42,8 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
 ```{r paquetes}
 library(tidyverse) # trata de datos
 library(broom) # modelos en version tidy 
-library(flextable)
+library(flextable) # tablas con formato 
+library(kableExtra) # tablas con formato
 library(reshape2)
 library(janitor) # limpieza
 library(skimr) # summary 
@@ -140,51 +138,41 @@ las variables en relación con la nota media. Se ajustan las nubes de
 puntos utilizando regresión lineal
 
 ```{r dispersiones lm}
-pisa %>% tidyr::gather(key = "variable", value = "valor", 3:8) %>% 
+pisa %>% 
+  gather(key = "variable", value = "valor", 3:8) %>% 
   ggplot(aes(x = valor, y = overall)) +
     geom_point(color = "darkslategray3", alpha = 0.75) +
-    
-  geom_smooth(method = "lm",
+    geom_smooth(method = "lm",
                 se = FALSE,
                 color = "red3") +
     
     facet_wrap(~variable, ncol = 3, scales = "free") +
-  theme_minimal()
+    theme_minimal()
 ```
-Se puede observar que la regresión lineal no se ajusta demasiado bien, en
+Se puede observar que la regresiónn lineal no se ajusta demasiado bien, en
 términos generales, a los datos. Probemos el mismo gráfico con un ajuste
 mediante GAM
 
-```{r modulo base}
-# Fit the model
-gam_mod <- gam(formula = overall ~ s(edu) + s(issues),
-               method = "GCV.Cp", 
-               data = pisa)
 
-# Plot the results
-plot(gam_mod, residuals = TRUE, pch = 1, shade = TRUE, shade.col = "palegreen")
-
-# Extrar coef 
-coef(gam_mod)
-```
 
 
 ```{r dispersiones GAM}
-pisa %>% tidyr::gather(key = "variable", value = "valor", 3:8) %>% 
+pisa %>%
+  gather(key = "variable", value = "valor", 3:8) %>% 
   ggplot(aes(x = valor, y = overall)) +
     geom_point(color = "darkslategray3", alpha = 0.75) +
     
-  geom_smooth(method = "gam",
+    geom_smooth(method = "gam",
                 se = FALSE,
                 color = "red3") +
     
     facet_wrap(~variable, ncol = 3, scales = "free") +
-  theme_minimal()
+    theme_minimal()
 ```
 Parece claro que un modelo GAM resulta el adecuado para este problema, pese 
 a haber variables que parecen presentar relación lineal.
 
-# Modelos iniciales 
+# Modelos GAM 
 
 Ya que todas las variables mostraban alta correlación, incluyo todas en el modelo. Utilizo splines suavizados en las variables que no muestran 
 relacion lineal en los gráficos. Solo empleo el hdi, puesto que las otras
@@ -194,62 +182,275 @@ tres variables (health, income y education estan contenidas en hdi)
 modelo_inicial <- gam(overall~ s(interest) + support + hdi, data = pisa)
 ```
 
-Planteo otro modelo con las variables de hdi por separado y en splines
+Planteo otro modelo con las variables de hdi por separado, y todas las variables
+con splines. El motivo es que, aunque la relación sea lineal, el spline se 
+suavizará para tomar forma de relacion lineal
 
 ```{r}
-modelo_secundario <- gam(overall ~ s(interest) + s(income) + edu +
-                           s(health) + support, data = pisa)
+modelo_splines <- gam(overall ~ s(interest) + s(income) + s(edu) +
+                           s(health) + s(support), data = pisa)
 ```
 
-Comparo los dos modelos 
+
+
+## Selección de nudos
+Se crea una secuencia de valores para los nudos de cada spline, se ajustan ambos
+modelos para cada número de nudos, y se evalúan las métricas de cada uno. 
+
+```{r modelo inicial}
+fold_id <- sample(1:10, 
+                  size = length(pisa), 
+                  replace = TRUE)
+
+# La tabla con las metricas inicializadas en NA
+tabla_de_ajustes <- tibble::tibble(
+  nudos      = seq(1, 20, by = 1), 
+  MSE        = NA,                   
+  AIC        = NA
+)
+
+# Utilizando un bucle, se evalua el modelo para cada uno de los 
+# totales de nudos
+for (i in seq_along(tabla_de_ajustes$nudos)) {
+  
+ 
+  # Uso el modelo inicial, con unn solo spline y distintos nudos 
+  fit <- gam(overall~ s(interest, k = tabla_de_ajustes$nudos[i]) + 
+               support + hdi, 
+             data = pisa) 
+  tabla_de_ajustes$MSE[i] <- mean((pisa$overall - fit$fitted.values)^2)
+  tabla_de_ajustes$AIC[i] <- fit$aic
+  
+}
+
+# La tabla con formato
+kable(tabla_de_ajustes, 
+      caption = "Métricas con distintos nudos, primer modelo") %>% 
+  kable_styling(bootstrap_options = "striped")
+  
+```
+Los resultados muestran que a mayor numero de nudos, mejor ajuste del modelo. 
+Sin embargo, desde el punto de vista predictivo, lo que se busca precisamente
+es evitar ese sobreajuste, para que el modelo pueda generalizar bien
+y tenga éxito al predecir sobre datos nuevos.
+A continuación, se repite el proceso anterior de evaluación del modelo para 
+distintos nudos, pero con el modelo secundario, con más splines. 
+
 
 ```{r}
-summary(modelo_inicial)
-summary(modelo_secundario)
+fold_id <- sample(1:10, 
+                  size = length(pisa), 
+                  replace = TRUE)
+
+# La tabla con las metricas inicializadas en NA
+tabla_de_ajustes_2 <- tibble::tibble(
+  nudos      = seq(1, 10, by = 1), 
+  MSE        = NA,                   
+  AIC        = NA
+)
+
+# Utilizando un bucle, se evalua el modelo para cada uno de los 
+# totales de nudos 
+for (i in seq_along(tabla_de_ajustes_2$nudos)) {
+  
+ 
+  # Uso el modelo con splines en todas las variables 
+  fit <- gam(overall ~ s(interest, k = tabla_de_ajustes_2$nudos[i]) + 
+                       s(income, k = tabla_de_ajustes_2$nudos[i]) + 
+                          s(edu, k = tabla_de_ajustes_2$nudos[i]) +
+                       s(health, k = tabla_de_ajustes_2$nudos[i]) + 
+                       s(support, k = tabla_de_ajustes_2$nudos[i]), 
+             data = pisa)
+  
+  tabla_de_ajustes_2$MSE[i] <- mean((pisa$overall - fit$fitted.values)^2)
+  tabla_de_ajustes_2$AIC[i] <- fit$aic
+  
+}
+
+kable(tabla_de_ajustes_2, 
+      caption = "Métricas con distintos nudos, primer modelo") %>% 
+  kable_styling(bootstrap_options = "striped")
+
 ```
-## Interpretación de los resultados
 
+De nuevo, es posible apreciar como a mayor numero de nudos, mejor ajuste del 
+modelo. No obstante, en la tabla anterior se evalúaa un mismo numero de nudos 
+para cada spline, cuando puede susceder que cada función de spline tenga un 
+número óptimo de nudos distinto de las demás. 
 
-
-
-## Regularización del modelo 
-# Evaluación del modelo 
-# Refinado del modelo 
-# Modelo final
-
-
-añadir el efecto parcial 
-library(mgcv)
-# Fit the model
-mod <- gam(hw.mpg ~ s(weight) + s(rpm) + s(price) + comp.ratio, 
-           data = mpg, method = "REML")
-
-# Plot the weight effect with colored shading
-plot(mod, select = 1, shade = TRUE, shade.col = "hotpink")
-
-# Make another plot adding the intercept value and uncertainty
-plot(mod, select = 1, shift = coef(mod)[1], seWithMean = TRUE)
-
-Model checking with gam.check
+## Visualicaciones de los modelos 
 
 ```{r}
+modelo_inicial_5_nudos <- gam(overall~ s(interest, k = 5) + support + hdi, 
+                              data = pisa)
 
-# Parametrizados
-
-interest_k <- 15
-income_k <- 12
-health_k <- 1
-
-modelo_secundario <- gam(overall ~ s(interest, k = interest_k) + 
-                           s(income, k = income_k) + 
-                           edu +
-                           health + 
-                           support, data = pisa)
+modelo_inicial_10_nudos <- gam(overall~ s(interest, k = 10) + support + hdi, 
+                              data = pisa)
 
 
+modelo_secundario_5_nudos <- gam(overall ~ s(interest, k = 5) + 
+                                           s(income, k = 5) + 
+                                           s(edu, k = 5) +
+                                           s(health, k = 5) + 
+                                           s(support, k = 5), 
+                                 data = pisa)
 
-summary(modelo_secundario)
-gam.check(modelo_secundario)
+modelo_secundario_10_nudos <- gam(overall ~ s(interest, k = 10) + 
+                                            s(income, k = 10) + 
+                                            s(edu, k = 10) +
+                                            s(health, k = 10) + 
+                                            s(support, k = 10), 
+                                 data = pisa)  
+
+
+
 ```
+
+```{r}
+# Modelo simple, un solo spline
+par(mfrow = c(1,2))
+plot(modelo_inicial_5_nudos, 
+     residuals = TRUE, 
+     pch = 1.2, 
+     
+     main = "Modelo con 5 nudos",
+     shade = TRUE,
+     shade.col = "cyan")
+
+plot(modelo_inicial_10_nudos, 
+     residuals = TRUE, 
+     pch = 1.2, 
+     
+     main = "Modelo con 10 nudos",
+     shade = TRUE,
+     shade.col = "cyan")
+
+```
+Se puede apreciar claramente como a mayor numero de nudos, mayor ajuste del 
+modelo a los datos. Otro argumento a tener en cuenta es `sp =`, con el cual 
+se puede determinar el factor de suavizado de cada nudo. Toma valores entre 
+0 y 1, siendo 1 el caso más extremo en el que la función de cada nudo 
+es totalmente plana.
+
+```{r}
+# Ejemplo sp 
+modelo_sp_bajo <- gam(overall~ s(interest, k = 10) + support + hdi, 
+                              data = pisa, sp = 0.00001)
+modelo_sp_alto <- gam(overall~ s(interest, k = 10) + support + hdi, 
+                              data = pisa, sp = 1)
+
+par(mfrow = c(1,2))
+plot(modelo_sp_bajo, 
+     residuals = TRUE, 
+     pch = 1.2, 
+     
+     main = "sp = 0.00001",
+     shade = TRUE,
+     shade.col = "cyan")
+
+plot(modelo_sp_alto, 
+     residuals = TRUE, 
+     pch = 1.2, 
+     
+     main = "sp = 1",
+     shade = TRUE,
+     shade.col = "cyan")
+```
+
+```{r}
+# Modelo secundario, con 3 splines
+
+plot(modelo_secundario_5_nudos, 
+     residuals = TRUE, 
+     pch = 1.2, 
+     pages = 1, 
+     all.terms = TRUE, 
+     main = "Modelo con 5 nudos",
+     shade = TRUE,
+     shade.col = "cyan")
+
+plot(modelo_secundario_10_nudos, 
+     residuals = TRUE, 
+     pch = 1.2, 
+     pages = 1, 
+     all.terms = TRUE, 
+     main = "Modelo con 10 nudos",
+     shade = TRUE,
+     shade.col = "cyan")
+```
+Las visualizaciones revelan de manera clara como a mayor numero de nudos, mejor 
+ajuste, llegnado al extremo de que para las variables income y health prácticamente
+ningúnn punto queda fuera del intervalo de confianza al emplear 20 nudos. El 
+modelo por tanto ajusta muy bien, pero probablemente est? sobreajustado, algo 
+que es un grave problema a la hora de predecir con el modelo. 
+
+
+Estos son los grados de libertad optimos para cada spline del modelo.
+
+## Comparativa de modelos 
+
+```{r}
+# Creo la funcion para sacar una tabla con estadisticos
+tablas <- function(modelo) {
+output <- width(flextable(glance(modelo)), width = 1.25)
+output
+}
+
+tablas(modelo_inicial_5_nudos)
+tablas(modelo_inicial_10_nudos)
+tablas(modelo_secundario_5_nudos)
+tablas(modelo_secundario_10_nudos)
+
+
+```
+El mejor de los anteriores modelos es el modelo secundario con 10 nudos, puesto
+que es el que presenta menor AIC. Si se utiliza el criterio Bayesiano, los 
+resultados son similares. 
+¿Cual sería el resultado con  otros grados de libertad? ¿Qué grados de libertad
+proucen el mejor modelo?
+
+## Selección de grados de libertad
+
+Los grados de libertad que R selecciona para variable se pueden 
+extraer de la siguiente mantera 
+
+```{r}
+# Defino una funcion que extraiga los grados de libertad de cada spline
+extrae_grados_libertad <- function(variable) {
+  
+  grados <- smooth.spline(x = variable, # vble. predictora como parametro
+                          y = pisa$overall, # vble. dependiente fija
+                          cv = TRUE)$df # cálculo mediante cross validation
+  grados
+}
+
+# Creo una tabla para recoger los datos de los grados de libertad 
+tabla_grados_libtertad <- tibble(
+  Variable = names(pisa[, 3:7]), # columna con los nombres de las vbles.
+  "Grados de libertad" = sapply(pisa[, 3:7], # variables predictoras 
+                              extrae_grados_libertad) # aplica la funcion
+)
+
+# Resultado
+kable(tabla_grados_libtertad, 
+      caption = "Tabla de grados de libertad para cada spline") %>% 
+  kable_styling(bootstrap_options = "striped")
+
+```
+
+Desafortunadamente, no he encontrado ninguna función
+en ningún paquete que permita seleecionar de manera manual cual es el número 
+de grados de libertad del modelo gam en conjunto. El argumento `df` de 
+`smooth.splines()` permite hacerlo, pero dicha función solo admite una variable
+predictora. Con todo, el modelo que mejor parece ajustarse
+a los datos es el siguiente 
+
+$overall\: =\: s(interest)\: +\: s(support)\: +\: s(income)\: +\: s(health)\: +\: s(edu)$
+
+
+utilizando 10 nudos en cada spline. Nuevamente, conviene recordar que estos
+datos son de caracter descriptivo, puesto que es muy porbable que el modelo esté
+sobreajustado, y sea absolutamente nulo en términos predictivos.
+
 
 
