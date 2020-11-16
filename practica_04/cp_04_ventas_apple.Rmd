@@ -1,0 +1,177 @@
+---
+title: "Series temporales: modelos ETS y ARIMA para predecir las ventas de apple"
+author: "Gabriel Blanco García"
+date: "14/11/2020"
+output: 
+    html_document:
+      toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.height = 7, fig.width = 10, fig.align = "center")
+```
+
+# Introducción 
+El objetivo de la práctica es estimar modelos ETS y modelos ARIMA sobre 
+la serie de ventas trimestrales de Apple. Se busca encontrar el mejor modelo
+para predecir las ventas del año 2017 y 2018
+
+```{r librerias}
+library(ggplot2)
+library(ggthemes)
+library(dplyr)
+library(forecast)
+library(ggfortify) 
+library(xts)
+library(plotly)
+```
+
+```{r lectura de datos}
+apple <- read.csv("data/IngresosApple.csv", 
+                  sep = ";", 
+                  dec = ",")
+
+# Tratamiento de las fechas 
+trimestres_raw <- seq(as.Date("2008/04/01"),
+                      as.Date("2017/07/01"),
+                      by = "quarter")
+
+```
+
+```{r formateo de fechas}
+# Objeto de tipo xts
+x_apple <- xts(apple$Ingresos, order.by = trimestres_raw)
+names(x_apple) <- "x_ventas"
+x_apple <- to.quarterly(x_apple)
+```
+
+```{r a zoo}
+# Objeto de tipo 
+z_apple <- as.zoo(x_apple$x_apple.Close)
+```
+# Modelo ETS
+Examinamos la serie temporal
+```{r Autoplot}
+autoplot(z_apple, color = "red") + 
+  theme_bw() +
+  theme(legend.position = "none")
+  
+```
+La gráfica anterior muestra varias cosas a tener en cuenta de cara a la 
+estimación del modelo ETS. La serie presenta una clara tendencia ascendente, 
+que se va amortiguando con el tiempo, se suaviza. En cuanto a su varianza, es
+posible distinguir como esta va aumentando con la tendencia general de la serie,
+de manera multiplicativa. No obstante, no es necesario elegir el tipo de 
+componente de cada una de las partes del ETS (Error, Trend, Seasonality), 
+puesto que se eligen de manera automática con la función `ets()`
+```{r Estimación ETS}
+tres_ultimos_trimestres <- 3 # Se omiten tres trimesres
+observaciones <- length(z_apple)
+
+# Train
+train <- window(
+  z_apple, # importante usar los datos en formato zoo
+  start = index(z_apple[1]), # inicio de la serie
+  end = index(z_apple[observaciones - tres_ultimos_trimestres])) # Final: la 
+                                                                 # serie menos
+                                                                 # el periodo
+                                                                 # omitido
+
+# Test: mismo procedimiento, pero para hacer el subset final
+test <- window(
+  z_apple,
+  start = index(z_apple[observaciones - tres_ultimos_trimestres + 1]),
+  end = index(z_apple[observaciones]))
+
+
+# Ajuste del modelo 
+modelo_ets <- ets(train)
+# Resumen del modelo ETS
+summary(modelo_ets)
+# Prediccion ETS
+forecast(modelo_ets) %>% 
+  summary()
+```
+El modelo ETS estimado es del tipo (M, A, M). El AICc tiene un valor de 711.15.
+No obstante, esta métrica sirve solo para comparar entre modelos de la misma 
+familia. Para poder comparar el modelo con un ARIMA, hay que predecir con el 
+ETS y tomar las medidas de precisión de la predicción para compararlas con 
+las de la predicción mediante ARIMA. 
+
+```{r Prediccion ETS}
+
+df_apple <- data.frame(Ventas = as.vector(z_apple),
+                       Fecha = time(z_apple))
+
+ggplot(df_apple, aes(x = Fecha, y = Ventas)) +
+    geom_line(color = "cyan4", size = 0.75) +
+    labs(title = "Ventas trimestrales de Apple") +
+    geom_forecast(forecast(modelo_ets, alpha = 0.4)) +
+    theme_pander() 
+```
+
+# Modelo ARIMA
+El modelo ARIMA combina la influencia del pasado de una serie temporal con 
+los errores cometidos para predecir esa misma serie. Es útil cuando las 
+series temporales presentan componentes estacionales. Examinemos nuevamente 
+la serie de Apple esta vez utilizando un gráfico interactivo
+```{r a dataframe}
+ggplotly(
+  ggplot(df_apple, aes(x = Fecha, y = Ventas)) +
+    geom_line(color = "cyan4", size = 0.75) +
+    labs(title = "Ventas trimestrales de Apple") +
+    theme_pander()
+  )
+```
+El gráfico anterior es interactivo, algo que facilita la identificación de 
+puntos en la serie. Examinando los picos, vemos que todos ellos corresponden
+al primer trimestre de cada año. Las caídas corresponden siempre al tercer y 
+cuarto trimestre, y así sucesivamente. La serie tiene por tanto un 
+comportamiento estacional. No es necesario identificar el número de diferencias
+regulares ni estacionales del modelo, puesto que la función `auto.arima()` lo 
+hace de manera automática. No obstante, este sería el resultado de aplicar
+una diferencia estacional.
+Este es el aspecto de la serie original
+```{r}
+ggtsdisplay(z_apple)
+```
+Este es el aspecto de la serie tras aplicar la diferencia estacional
+```{r ARIMA}
+ggtsdisplay(diff(z_apple, 4))  # una diferencia estacional, parece que es AR(1)
+  
+```
+La función de autocrrelacion parcial sugiere quel orden de la parte 
+autorregresiva del modelo es 1. No obstante, el comando `auto.arima()` realiza 
+este trabajo de manera automática
+```{r ARIMA resumen}
+modelo_arima <- auto.arima(train, lambda = 0)
+summary(modelo_arima)
+```
+Efectivamente, el modelo que etima el comando `auto.arima()` aplica una
+diferencia estacional y otra regular, aunque al aplicar la transformación 
+Box-Cox a la serie, los términos AR y MA son de orden 0.
+```{r Prediccion Arima}
+forecast(modelo_arima) %>% 
+  summary()
+```
+
+```{r Grafico de predicciones}
+  ggplot(df_apple, aes(x = Fecha, y = Ventas)) +
+    geom_line(color = "cyan4", size = 0.75) +
+    labs(title = "Ventas trimestrales de Apple") +
+    geom_forecast(forecast(modelo_arima, alpga = 0.4)) +
+    theme_pander()
+
+```
+Para comparar ambos modelos, se evalúan sus métricas de capacidad predictiva
+```{r Comparacion de modelo}
+summary(forecast(modelo_ets))
+summary(forecast(modelo_arima))
+```
+
+ El RMSE del modelo ETS es de 4120.155, mientras que para el ARIMA es de 
+ 4786.405. Por tanto, el mejor modelo para predecir la ventas de Apple 
+ en este caso es el modelo ETS
+ 
+
