@@ -1,0 +1,238 @@
+---
+title: 'Análisis de intervención: Colgate vs. Crest'
+author: "Gabriel Blanco García"
+date: "17/11/2020"
+output: 
+    html_document:
+      toc: true
+---
+El análisis de intervención proporciona una herramienta que puede ser útil 
+para evaluar el impacto de las iniciativas que la empresa, los competidores 
+o terceros pueden realizar en el mix de mercado. En esta caso práctico, 
+consideramos la lucha por la cuota de mercado entre la crema dental Colgate de Colgate-Palmolive y la crema dental Crest de Procter y Gamble.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.height = 7, fig.width = 10, fig.align = "center")
+```
+
+```{r Librerias}
+library(ggplot2)
+library(ggthemes)
+library(dplyr)
+library(forecast)
+library(ggfortify) 
+library(xts)
+library(plotly)
+library(TSA)
+library(readxl)
+library(zoo)
+library(astsa)
+library(moments) # Test de residuos
+```
+
+Lectura de los datos
+```{r lectura datos}
+datos <- read_excel("data/data.xlsx")
+
+glimpse(datos) # lectura corecta
+
+ts_colgate <- ts(datos$Colgate, start = 1958, freq = 52)
+ts_crest <- ts(datos$Crest, start = 1958, freq = 52)
+```
+Se trata de datos semanales de las ventas de Colgate y Crest, desde 1958  a 1962.
+El 1 de de agosto de 1960 _el Consejo de Terapéutica Dental de la American_ 
+_Dental Association (ADA) aprobó a Crest como una “ayuda importante en cualquier_ 
+_programa de higiene dental”._ Esta es la fecha en la que sucede la 
+intervención. 
+Los datos tienen la fecha separada en dos columnas, una en años y otra en 
+semanas. Lo soluciono con `lubridate::make_datetime()` y `lubridate::weeks()`
+```{r union fechas}
+library(lubridate)
+fecha <- make_datetime(year = datos$Year) + weeks(datos$Week) 
+head(fecha) # funciona
+
+# Lo añado al dataframe
+datos <- datos %>% 
+  mutate(fecha = fecha)
+```
+
+Gráfico de las dos series de cuotas de mercado 
+```{r visualizaciones}
+# Colgate
+ggplot(datos, aes(x = fecha, y = Colgate)) +
+  geom_line() +
+  
+  labs(title = "Cuota de mercado de Colgate: 1958-1952",
+       x = "Fecha") +
+  theme_pander()
+  
+
+# Crest
+ggplot(datos, aes(x = fecha, y = Crest)) +
+  geom_line() +
+
+  labs(title = "Cuota de mercado de Crest: 1958-1952",
+       x = "Fecha") +
+  theme_pander()
+```
+Está claro que el anuncio trastoca ambas series temporales de manera clara. 
+Preparo los datos
+
+```{r division de los datos}
+
+# Divido ambas series 
+corte <- 16
+observaciones <- nrow(datos)
+
+# Divido con window 
+# Paso el ts a formato zoo
+zoo_colgate <-  as.zoo(ts_colgate)
+zoo_crest <- as.zoo(ts_crest)
+
+# Colgate 
+z_colgate_train <- window(zoo_colgate, 
+                          start = index(zoo_colgate[1]),
+                          end = index(zoo_colgate[observaciones - corte]))
+
+z_colgate_test <- window(zoo_colgate, 
+                          start = index(zoo_colgate[observaciones - corte + 1]),
+                          end = index(zoo_colgate[observaciones]))
+
+# Crest 
+z_crest_train <- window(zoo_crest, 
+                          start = index(zoo_crest[1]),
+                          end = index(zoo_crest[observaciones - corte]))
+
+z_crest_test <- window(zoo_crest, 
+                          start = index(zoo_crest[observaciones - corte + 1]),
+                          end = index(zoo_crest[observaciones]))
+```
+
+
+
+
+Primero hay que averiguar el orden del ARIMA. Utilizo `auto.arima()`
+Proceso con Colgate
+```{r autoarima colgate}
+ggtsdisplay(z_colgate_train) # sin diferencias
+ 
+ggtsdisplay(diff(z_colgate_train)) # una diferencia, se asemeja a MA(1)
+
+
+
+
+modelo_arima_colgate <- auto.arima(z_colgate_train)
+modelo_arima_colgate
+```
+El modelo que se selecciona es ARIMA(0, 1, 1)(1, 0, 0). A continuación se comprueba 
+que los errores son ruido blanco.
+```{r ruido blanco colgate}
+# Examen de residuos colgate:
+modelo_arima_colgate <- auto.arima(z_colgate_train)
+checkresiduals(modelo_arima_colgate$residuals)
+
+
+Box.test(modelo_arima_colgate$residuals, 
+         lag = 1, 
+         fitdf = 0,  # es el lag - el numero de parametros del arma
+         type = "Ljung-Box")
+```
+Los residuos de Colgate son ruido blanco. Ahora con Crest
+```{r Arima crest}
+modelo_arima_crest <- auto.arima(z_crest_train)
+modelo_arima_crest
+checkresiduals(modelo_arima_crest$residuals)
+
+# Box Ljung y Berra
+Box.test(modelo_arima_crest$residuals, 
+         lag = 1, 
+         fitdf = 0,  # es el lag - el numero de parametros del arma
+         type = "Ljung-Box")
+
+
+
+```
+Los residuos también son ruido blanco. 
+
+Pasamos a la parte de los modelos ARIMAX.
+En primer lugar, se estiman ARIMAX con AR(1) y k = 15 para estudiar 
+el efecto de la intervención
+```{r ARIMAX Colgate paso 1}
+colgate_arimax <- arimax(z_colgate_train, 
+       order = c(1, 0, 0), # AR(1)
+       # Sin componente estacional
+       xtransf = data.frame(intervencion = 1*(seq(z_colgate_train) >= 135)),
+       transfer = list(c(0,15)),
+       method = 'ML')
+
+plot(colgate_arimax$coef, type = "h", main = "Efecto de la noticia sobre
+     Colgate")
+```
+Ahora examinamos aquellos términos que son significativos, para determinar 
+el retardo de la intervención. Todos son 0, así que se pone 0 en la funcion.
+Se examina la forma de los efectos en el gráfico para determinar el orden 
+de r y s. El gráfico muestra que el decaimiento es instantáneo, así que el 
+orden de s  es igual a 0. En cuanto a r, la forma de los efectos es lineal, así que el orden de r es igual a 0.
+
+```{r Arimax colgate paso 2}
+colgate_arimax <- arimax(z_colgate_train, 
+       order = c(0, 1, 1),
+       seasonal = list(order = c(1, 0, 0), period = 52), # El orden del ARIMA 
+       xtransf = data.frame(intervencion = 1*(seq(z_colgate_train) >= 135)),
+       transfer = list(c(0, 0)), # lo que se ha decidido antes
+       method = 'ML')
+
+
+detectAO(colgate_arimax) # no hay 
+detectIO(colgate_arimax) # no hay
+
+# Grafico de la serie y del modelo 
+# Colgate
+plot(ts_colgate, main = "Serie de Colgate y estimaciones")
+points(fitted(colgate_arimax), col = "green")
+
+```
+
+Se repite el proceso con la serie de Crest
+
+```{r ARIMA Crest paso 1}
+crest_arimax <- arimax(z_crest_train, 
+       order = c(1, 0, 0), # AR(1)
+       
+       xtransf = data.frame(intervencion = 1*(seq(z_crest_train) >= 135)),
+       transfer = list(c(0, 15)), # k = 15
+       method = 'ML')
+
+plot(crest_arimax$coef, type = "h", main = "Crest: efecto de la intervención")
+```
+Se examinan los términos para determinar el orden de b, r y s. El gráfico
+muestra que el efecto es instantáneo, no hay retardo, así que b = 0. En cuanto
+al decaimiento, el efecto cae en el segundo coeficiente, así que s =0. En 
+cuanto a r, la forma de los efectos es lineal, así que r = 0. Se construye 
+dicho ARIMAX y se examinan los outliers.
+
+```{r ARIMAX Crest paso 2}
+crest_arimax <- arimax(z_crest_train, 
+       order = c(0, 1, 1), # orden del ARIMA de Crest
+       
+       xtransf = data.frame(intervencion = 1*(seq(z_crest_train) >= 135)),
+       transfer = list(c(0, 0)),
+       method = 'ML')
+
+detectAO(crest_arimax) # no hay outliers
+detectIO(crest_arimax) # no hay outliers 
+
+plot(ts_crest, main = "Serie de Crest y estmiaciones")
+points(fitted(crest_arimax), col = "red")
+```
+Ya están los dos ARIMAX construidos, a continuación el resumen de ambos
+
+
+```{r Summry ARIMAXs}
+summary(colgate_arimax)
+summary(crest_arimax)
+```
+El root mean squared error es de 4.67% en el caso del modelo de Colgate 
+y de 4.35% para el modelo de Crest.
+
