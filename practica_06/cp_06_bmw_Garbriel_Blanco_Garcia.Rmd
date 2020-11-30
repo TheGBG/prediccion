@@ -1,0 +1,321 @@
+---
+title: "BMW vs Volskwagen"
+    
+author: "Gabriel Blanco García"
+date: "24/11/2020"
+output: 
+    html_document:
+      toc: true
+      toc_depht: 4
+      number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+# Objetivo
+En esta práctica se trabaja con modelos de heterocedasticidad condicional 
+autoregresiva generalizada (GARCH) y modelos de vectores autoregresivos (VAR). 
+El primer tipo de instrumentos es de uso común en el ámbito financiero, por su 
+utilidad para la estimación de volatilidades. El segundo tipo se emplea en 
+numerosas ocasiones, cuando las relaciones entre variable dependiente y 
+variables predictoras son bidireccionales.  
+Para la puesta en práctica, se trabaja con los datos bursátiles de BMW y 
+Volskwagen.
+```{r Librerias}
+# Obtencion de los datos
+library(quantmod)
+
+# Tratamiento, imputacion y formateo
+library(dplyr)
+library(tidyr)
+library(imputeTS)
+library(xts)
+
+# Visualizaciones
+library(ggplot2)
+library(grid)
+library(gridExtra)
+
+# Modelado y predicciones
+library(rugarch)
+library(forecast)
+library(fGarch)
+library(vars)
+
+# Tema de los plots
+theme_set(theme_minimal())
+```
+
+# Carga y limpieza de datos
+Se obtienen las series temporales de Yahoo Finance utilizando 
+`quantmod::getSymbols()` desde el año 2014 hasta la actualidad. Ambas series 
+contienen dos valores NA, los cuales se imputan por el valor previo. Se 
+trabaja con el precio de cierre ajustado
+```{r carga y limpieza}
+bmw <- getSymbols("BMW.DE", from = "2014-01-01", auto.assign = FALSE)
+wagen <- getSymbols("VOW.DE", from = "2014-01-01", auto.assign = FALSE)
+
+# Trabajamos con el precio de cierre ajustado
+bmw <- bmw$BMW.DE.Adjusted
+wagen <- wagen$VOW.DE.Adjusted
+
+# Cambio el nombre
+names(bmw) <- "precio"
+names(wagen) <- "precio"
+
+# NAs en BMW y Volskwagen
+bmw %>% 
+  is.na() %>% 
+  sum()
+
+wagen %>% 
+  is.na() %>% 
+  sum()
+
+# Imputacion por valor más próximo 
+bmw <- bmw %>%
+  na_locf()
+
+wagen <- wagen %>% 
+  na_locf()
+```
+
+Las dos series están limpias y preparadas para trabajar.
+
+# Modelo GARCH de BMW
+
+En primer lugar, se calulan los rendimientos diarios y la volatilidad. El 
+siguiente gráfico muestra las tres series.
+```{r rendimientos diarios}
+# Calculo de los rendimientos diarios
+rendimiento_bmw <- bmw %>% 
+  dailyReturn(type = "log", leading = FALSE)
+
+# Se elimina la primera observacion, que ahora es NA
+rendimiento_bmw <- rendimiento_bmw %>% 
+  na.exclude()
+# Caulculo la volatilidad como el cuadrado de los rendimientos 
+volatilidad_bmw <- rendimiento_bmw ^ 2
+
+# Visualizaciones
+
+# Primero genero los  plots
+
+# Precio
+plot_precio_bmw <- ggplot(bmw[-1], # para que tenga la misma longitud que el 
+                                   # rendimiento, que pierde uno por tener NA
+                          aes(x = index(bmw[-1]), y = precio)) +
+  geom_line(color = "seagreen") +
+  labs(x = NULL, 
+       y = "Precio al cierre") +
+  theme(text = element_text()) 
+
+# Rendimiento
+plot_rendimiento_bmw <- ggplot(rendimiento_bmw, aes(x = index(rendimiento_bmw), 
+                                                    y = daily.returns)) +
+  geom_line(color = "firebrick") +
+  labs(x = NULL, 
+       y = "Rendimiento diario") +
+  theme(text = element_text())
+
+# Volatilidad 
+plot_volatilidad_bmw <- ggplot(volatilidad_bmw, aes(x = index(volatilidad_bmw), 
+                                                    y = daily.returns)) +
+  geom_line(color = "darkblue") +
+  labs(x = NULL, 
+       y = "Volatilidad diaria") +
+  theme(text = element_text())
+
+# Después los uso en grid.arrange
+grid.arrange(plot_precio_bmw, 
+             plot_rendimiento_bmw,
+             plot_volatilidad_bmw,
+             nrow = 3,
+             top = textGrob("BMW", # titulo del plot
+                            gp = gpar(fontsize = 20, # formato de la fuente  
+                                      font = 2))) 
+```
+  
+  
+
+Vemos como la media de los rendimientos diarios tiende a 0, fenómeno común 
+en rendimientos a corto plazo de activos financieros.  
+Aplicamos un t.test para la media de los rendimientos para contrastarlo.
+```{r t test rednimientos}
+t.test(rendimiento_bmw)
+```
+Dado el resultado del test, no se rechaza la hipótesis de que la media de los 
+rendimientos sea igual a 0, tal como sugería la representación gráfica. 
+A continuación se analiza la volatilidad, elemento clave en los modelos GARCH
+
+```{r analisis volatilidad}
+# Plots de las funciones de autocorrelacion y autocorrelación parcial
+tsdisplay(volatilidad_bmw, main = "Volatilidad BMW")
+
+# Test de Box Ljung para 10, 20 y 40 retardos
+Box.test(volatilidad_bmw, lag = 10,  type = "Lj")
+Box.test(volatilidad_bmw, lag = 20,  type = "Lj")
+Box.test(volatilidad_bmw, lag = 40,  type = "Lj")
+
+
+```
+Se rechaza la hipótesis de que la volatilidad sea ruido blanco, algo idóneo
+para los modelos GARCH. Se utiliza la distribución t-Student para los residuos
+del modelo de volatilidad. 
+
+Se construye el GARCH(1, 1)
+```{r GARCH BMW}
+garch_bmw <- garchFit(~1 + garch(1, 1),
+                      data = rendimiento_bmw, 
+                      trace = F,
+                      cond.dist = "std")
+summary(garch_bmw)
+
+```
+Con el modelo GARCH, es posible predecir la volatilidad. Esta aplicación de 
+los GARCH es muy útil en mercados financieros de derivados, donde el precio 
+de los derivados negociados varía en función de la volatilidad del activo 
+subyacente. A mayor volatilidad, mayor el precio del derivado.
+```{r prediccion con GARCH}
+# Pasar a ggplot 2?
+
+predict(garch_bmw, 
+        n.ahead = 10,
+        plot = TRUE,
+        crit_val = 2)
+
+```
+El gráfico muestra la predicción para la media en rojo, con las bandas de los 
+intervalos inferior y superior, calculados como la distancia entre la media y 
+2 por la raiz del error cuadrático medio. Estos límites se pueden utilizar para
+plantear estrategias de entrada y salida del mercado. Cuando los rendimientos 
+se acerquen al límite inferior, sería coherente comprar esperando que vuelva 
+a subir. Análogamente, el acercamiento a la banda superior podría ser 
+indicador de que los rendimientos van a caer pronto, y lo coherente sería 
+cerrar posiciones largas.
+
+# Cointegración
+
+# Modelo VAR mensual entre los dos activos
+
+Los vectores autorregresivos son modelos especialmente útiles cuando existe 
+bidireccionalidad. Hasta ahora, los modelos anteriormente estudiadios imponían
+unidireccionalidad en la relación entre la variable dependiente y las 
+variables predictoras. Pero existen muchos casos en donde la relación es 
+bidireccional: las predicctoras provocan cambios en la dependiente pero 
+la dependiente también provoca cambios en la predictora. Los instrumentos 
+adecuados para la modelización de estas relaciones son los VAR, donde 
+todas las variables son tratadas de manera simétrica.  
+Antes de construir el VAR, se calcúlan los rendimientos mensuales de ambas 
+series
+```{r rendimientos mensuales}
+bmw_rendimiento_mensual <- monthlyReturn(bmw)
+wagen_rendimiento_mensual <- monthlyReturn(wagen)
+
+
+# Gráfico de las series con sus rendimientos 
+
+# BMW
+plot_precio_bmw <- ggplot(bmw, # para que tenga la misma longitud que el 
+                                   # rendimiento, que pierde uno por tener NA
+                          aes(x = index(bmw), y = precio)) +
+  geom_line(color = "seagreen") +
+  labs(x = NULL, 
+       y = "Precio al cierre") +
+  theme(text = element_text()) +
+  ylim(0, 225)
+
+# Rendimiento bmw
+plot_rendimiento_bmw <- ggplot(bmw_rendimiento_mensual, 
+                               aes(x = index(bmw_rendimiento_mensual), 
+                                                    y = monthly.returns)) +
+  geom_line(color = "firebrick") +
+  labs(x = NULL, 
+       y = "Rendimiento mensual") +
+  theme(text = element_text()) +
+  ylim(-0.3, 0.3)
+
+# Wagen
+plot_precio_wagen <- ggplot(wagen, # para que tenga la misma longitud que el 
+                                   # rendimiento, que pierde uno por tener NA
+                          aes(x = index(wagen), y = precio)) +
+  geom_line(color = "darkblue") +
+  labs(x = NULL, 
+       y = NULL) +
+  theme(text = element_text()) +
+  ylim(0, 225)
+
+# Rendimiento wagen
+plot_rendimiento_wagen <- ggplot(wagen_rendimiento_mensual, 
+                               aes(x = index(wagen_rendimiento_mensual), 
+                                                    y = monthly.returns)) +
+  geom_line(color = "orange2") +
+  labs(x = NULL, 
+       y =  NULL) +
+  theme(text = element_text()) +
+  ylim(-0.3, 0.3)
+
+grid.arrange(plot_precio_bmw, 
+             plot_precio_wagen,
+             plot_rendimiento_bmw,
+             plot_rendimiento_wagen,
+             nrow = 2,
+             top = textGrob("BMW vs. Volkswagen", # titulo del plot
+                            gp = gpar(fontsize = 20, # formato de la fuente  
+                                      font = 2))) 
+```
+  
+  
+La gran caída de Volkswagen se debe al escándalo del falseamiento de las 
+métricas de C02 de sus vehículos, suceso que no afectó a BMW.  
+
+A continuacuón se construye el VAR. Primero se crea el vector de rendimientos, 
+después se calcula el orden del VAR, y finalmente, se estima el VAR.
+```{r orden VAR}
+# Se construyen los datos con los rendimientos 
+vector_rendimientos <- cbind(bmw_rendimiento_mensual, wagen_rendimiento_mensual)
+names(vector_rendimientos) <- c("BMW", "Wagen")
+
+# Se estima el orden del VAR
+VARselect(vector_rendimientos)
+
+```
+Como hay dos criterios que indican orden 2, y dos que indican orden 1, se 
+estiman ambos VAR.
+
+```{r estimacion VAR}
+# Se construyen ambos VAR
+var_orden_1 <- VAR(vector_rendimientos, 
+                   p = 1, # orden 1
+                   type = "none") # sin regresores deterministas
+var_orden_2 <- VAR(vector_rendimientos, 
+                   p = 2, # orden 2
+                   type = "none")
+
+
+summary(var_orden_1)
+summary(var_orden_2)
+```
+Se examina la causalidad mediante el test de Granger
+```{r causalidad Granger}
+causality(var_orden_1)
+causality(var_orden_2)
+```
+En ambos modelos, el p valor permite rechazar la hipótesis nula de que no 
+existe causalidad entre las variables. 
+```{r respuestas impulsos}
+irf(var_orden_1)
+irf(var_orden_2)
+```
+Predicciones 
+```{r predicciones}
+predict(var_orden_1, n.ahead = 8, ci = 0.95) 
+predict(var_orden_2, n.ahead = 8, ci = 0.95) 
+
+```
+
+
+# Modelo HHM para la serie semanal de BMW
