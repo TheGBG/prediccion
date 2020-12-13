@@ -1,0 +1,185 @@
+---
+title: "Modelos de impacto causal: Volkswagen y el escándalo de las emisiones"
+author: "Gabriel Blanco García"
+date: "13/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+```{r Librerías}
+
+library(xts)
+library(ggplot2)
+library(CausalImpact)
+library(quantmod)
+
+library(imputeTS)
+
+library(dplyr)
+library(tidyr)
+library(imputeTS)
+library(ggthemes)
+
+
+theme_set(theme_pander())
+```
+
+
+El objetivo de esta práctica es utilizar modelos de impacto causal para 
+estimar si el escándalo de las emisiones en los vehículos de Volkswagen
+tuvieron efectos significativos en la cotización de la empresa.  
+
+Se descargan los datos de la cotización diaria de BMW y Volskwagen utilizando 
+`quantmod`. Para los valores perdidos (en el caso de que los haya), 
+se imputa el valor más próximo antes del valor perdido. Los datos se 
+toman desde el inicio de 2014 hasta octurbe del 2017.  
+```{r Carga de los datos}
+
+inicio <- "2014-01-01"
+final <- "2017-10-31"
+
+wagen <- getSymbols("VOW.DE", 
+                    from = inicio,
+                    to = final,
+                    auto.assign = FALSE) 
+
+bmw <- getSymbols("BMW.DE", 
+                  from = inicio,
+                  to = final,
+                  auto.assign = FALSE)
+
+wagen <- wagen[, 6] # solo el precio ajustado
+bmw <- bmw[, 6]
+
+colnames(wagen) <- "precio" # cambio el nombre 
+colnames(bmw) <- "precio"
+
+
+# Se imputa el valor más cercano
+wagen <- wagen %>% 
+  na_locf()
+
+bmw <- bmw %>% 
+  na_locf()
+
+```
+
+A continuación un gráfico de la cotización de ambas series, con la fehca del 
+diesel gate marcada en rojo por una línea vertical.
+
+```{r Grafico}
+# Creo unos datos conjuntos
+datos_conjuntos <- tibble(Fecha = index(bmw),
+                          Volskwagen = wagen$precio,
+                          BMW = bmw$precio)
+
+diesel_gate <- as.Date("2015-09-18") # fecha del diesel gate
+
+# Los paso a formato lagro y hago el plot conjunto 
+
+datos_conjuntos %>% 
+  gather(key = "serie", value = "precio", 2:3) %>% # formato largo
+  
+  ggplot(aes(x = Fecha, 
+             y = precio, 
+             color = serie)) + # asi se plotea una linea de cada color
+  
+  geom_line() + 
+  
+  geom_vline(xintercept = diesel_gate, # linea vertical de la fecha del 
+                                       # diesel gate
+             color = "red") +
+  
+  labs(title = "Precios de BMW y Volwskagen",
+       x = NULL,
+       y = "Precio de cierre ajusado",
+       color = NULL) +
+  
+  guides(color = guide_legend(reverse = TRUE)) + # reordena la leyenda
+  
+  scale_color_manual(values = c("darkblue", "seagreen")) # color de cada serie
+  
+```
+  
+  
+Para el modelo de Causal Impact se necesitan tres elementos: la serie,
+el periodo previo a la intervención y el periodo posterior. Se generan ambos
+periodos.
+
+```{r Periodos}
+periodo_previo <- as.Date(c(inicio, "2015-09-18"))
+periodo_posterior <- as.Date(c("2015-09-19", final))
+```
+
+Ahora se construye el modelo. Primero un modelo simple, solo para Volskwagen
+
+```{r modelo Causal Impact VW}
+# Se declara una función para no tener que repetir el código 
+
+impacto_causal <- function(datos) {
+  
+  CausalImpact(datos, # la función del modelo, con los datos como argumento
+               
+               pre.period = periodo_previo, # los parámetros que no varían
+               post.period = periodo_posterior)
+}
+
+# Se aplica la función
+modelo_causal_impact_wagen <- impacto_causal(wagen)
+
+# Representación gráfica
+plot(modelo_causal_impact_wagen)
+
+```
+  
+  
+  
+Los resultados son bastante pobres. Se construye el mismo modelo, pero 
+añadiendo BMW como regresor. Basta con combinar las series en un mismo objeto
+con `cbind()` y pasarlo como argumento de la función.
+
+```{r modelo con BMW como regresor}
+# Se combinan las series
+datos_conjuntos <- cbind(wagen, bmw)
+
+# Se aplica la función
+modelo_causal_impact_wagen_bmw <-  impacto_causal(datos_conjuntos)
+
+# Representación gráfica
+plot(modelo_causal_impact_wagen_bmw)
+```
+  
+Los resultados mejoran notablemente. En azul se representa el precio que habría 
+tenido Volksagen __si no hubiese sucedido el escándalo__. Se representa en 
+términos medios con intervalo de confianza al 95%.  
+Según el modelo, la cotización de Volkswagen hubiese sido mucho más alta de no 
+ser por el escándalo. Hasta mediados de 2016, el valor real no alcanza ni 
+las bandas del intervalo de  confianza, lo que evidencia la severidad de 
+la caída.  
+
+A continuación se incluye el resumen y el report.
+```{r summary y report}
+summary(modelo_causal_impact_wagen_bmw)
+summary(modelo_causal_impact_wagen_bmw, "report")
+```
+
+Tal como se puede observar, el escándalo de las emisiones de los coches de 
+Volskwagen pasó factura a la empresa, algo que quedó totalmente reflejado
+en la bolsa. La cotización  de sus acciones quedó trastocada por el 
+fenómeno.  
+
+El efecto del escándalo, estadísticamente significativo, se traduce
+en una caida de 27.09 euros en media, con un intervalo de confianza para el 
+95% de 5.42 hasta 48.8 euros de caida. En términos relativos, la cotización
+baja un 18%, y el intervalo es de 4% de caída hasta un 33%.  
+
+No obstante, es conveniente que tener en cuenta que la amplitud de los 
+intervalos de confianza se dispara con el paso del tiempo, así que este método 
+no es aconsejable para el largo plazo. Es útil para el corto y medio plazo, 
+después pierde precisión.
+
